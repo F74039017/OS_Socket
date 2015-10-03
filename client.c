@@ -4,6 +4,11 @@
 #include <sys/socket.h> // socket
 #include <arpa/inet.h> //inet_addr
 #include <pthread.h>
+#include <unistd.h>
+#include <semaphore.h>
+
+#define TRUE 1
+#define FALSE 0
 
 // Fail code
 #define RECV_PTHREAD_FAIL 1
@@ -13,11 +18,21 @@
 #define MAX_FILENAME_LEN 100
 #define MAX_MESSAGE_LEN 1024
 
+/* thansfer flags */
+#define TRANSFER_WAIT 0
+#define TRANSFER_OK 1
+#define TRANSFER_DISCARD 2
+
 //  MODE
 #define MESSAGE_MODE 1
 #define DOWNLOAD_MODE 2
 
+sem_t semaphore;
+
 int mode;
+char savedName[MAX_FILENAME_LEN];
+int trans_state;
+FILE *fp;
 
 void* receive_handler(void* );
 void* write_handler(void* );
@@ -62,6 +77,9 @@ int main(int argc , char *argv[])
     }
     puts("Connected");
 
+    /* init threads shared variable */
+    sem_init(&semaphore, 0, 1);
+    trans_state = TRANSFER_WAIT;
     mode = MESSAGE_MODE;
 
     pthread_t rthread;
@@ -107,6 +125,7 @@ void* receive_handler(void* socket_desc)
         DOWNLOAD_MODE is invoked in wthread when output command 'd'.
         MESSAGE_MODE will switch back automatically when download has been
         **/
+
         if(mode == MESSAGE_MODE)
         {
             message[read_size] = '\0';
@@ -116,7 +135,40 @@ void* receive_handler(void* socket_desc)
         }
         else if(mode == DOWNLOAD_MODE)  // invoke in wthread. command 'd'
         {
+            /* Show filename asking message */
+            message[read_size] = '\0';
+            printf("%s", message);
+            fflush(stdout);
 
+            // Response the filename in wthread.
+            // Block and wait for setting trans_state
+            sem_wait(&semaphore);
+
+            // DEBUG - CHECK RTHREAD GET IN SEMAPHORE
+            // printf("in semaphore\n");
+
+            /* start to receive data */
+            if(trans_state == TRANSFER_OK)
+            {
+                while((read_size = recv(sock, message, MAX_MESSAGE_LEN-1, 0)) > 0)
+                {
+                    //++ write output to the file
+                    // DEBUG - OUTPUT DATA TO STDIN
+                    message[read_size] = '\0';
+                    printf("%s", message);
+                    fflush(stdout);
+                }                  
+            }
+
+            sem_post(&semaphore);
+
+            /* transfer done. resume message mode */
+            if(fp)
+                fclose(fp);
+
+            /* resume to message mode */
+            mode = MESSAGE_MODE;
+            printf("mode change %d\n", mode);
         }
     }
 
@@ -143,11 +195,62 @@ void* write_handler(void* socket_desc)
     /* Get server message and output */
     while(1)
     {
+        /* get command and send it to server */
         fgets(message, MAX_MESSAGE_LEN, stdin);
-        write_size = write(sock, message, strlen(message));
-
+        if(mode == MESSAGE_MODE)
+            write_size = write(sock, message, strlen(message));
+        
         if(message[0] == 'd')
+        {
+            /* change to download mode => prevent from invoking other commands */
             mode = DOWNLOAD_MODE;
+
+            /* set semaphore to block rthread recv() */
+            sem_wait(&semaphore);
+            // DEBUG - CHECK SEMAPHORE IS LOCKED
+            // printf("semaphore lock\n");
+
+            /* write filename to server */
+            fgets(savedName, MAX_FILENAME_LEN, stdin);
+            savedName[strlen(savedName)-1] = '\0';  // trim
+            write_size = write(sock, savedName, strlen(savedName));
+
+            /* check existance and ask overwrite */
+            if(access(savedName, F_OK) != -1)
+            {
+                int overwrite = FALSE;
+
+                /* check overwrite */
+                printf("The file has already existed, do you want to overwrite?[y/n] ");
+                char check;
+                scanf("%c", &check);
+                if(check == 'y')
+                    overwrite = TRUE;
+
+                /* send transfer flag to server */
+                if(overwrite)
+                {
+                    fp = fopen(savedName, "w");
+                    trans_state = TRANSFER_OK;
+                    write(sock, "TRANSFER_OK", 11);
+                }
+                else
+                {
+                    trans_state = TRANSFER_DISCARD;
+                    write(sock, "TRANSFER_DISCARD", 16);
+                }
+
+            }
+            else
+            {
+                fp = fopen(savedName, "w");
+                trans_state = TRANSFER_OK;
+                write(sock, "TRANSFER_OK", 11);
+            }
+
+            /* trans_state setting finish */
+            sem_post(&semaphore);
+        }
     }
 
 

@@ -8,6 +8,9 @@
 #include <dirent.h>
 // #include <signal.h>
 
+#define TRUE 1
+#define FALSE 0
+
 /* Fail Code */
 #define SERVER_SOCKET_FAIL 1
 #define SERVER_BIND_FAIL 2
@@ -19,6 +22,11 @@
 #define MAX_FILENAME_LEN 100
 #define MAX_COMMAND_LEN 50
 #define MAX_MESSAGE_LEN 1024
+
+/* thansfer flags */
+#define TRANSFER_WAIT 0
+#define TRANSFER_OK 1
+#define TRANSFER_DISCARD 2
  
 void *connection_handler(void *);
 void message_trim(char*);
@@ -124,7 +132,7 @@ void *connection_handler(void *socket_desc)
 		{
 			server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
-			if((read_size = recv(sock, filename, MAX_FILENAME_LEN, 0)) > 0)  // get filename from client
+			if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
                 message_trim(filename);
                 /* check whether the file exists */
@@ -151,7 +159,7 @@ void *connection_handler(void *socket_desc)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
-            if((read_size = recv(sock, filename, MAX_FILENAME_LEN, 0)) > 0)  // get filename from client
+            if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
                 message_trim(filename);
                 if(access(filename, F_OK) != -1)
@@ -194,7 +202,7 @@ void *connection_handler(void *socket_desc)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
-            if((read_size = recv(sock, filename, MAX_FILENAME_LEN, 0)) > 0)  // get filename from client
+            if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
                 message_trim(filename);
                 if(access(filename, F_OK) != -1)
@@ -206,7 +214,6 @@ void *connection_handler(void *socket_desc)
                     server_message = "File doesn't exist\n";
                     write(sock, server_message, strlen(server_message));
                 }
-
             }
             else
                 perror("recv failed");
@@ -235,20 +242,45 @@ void *connection_handler(void *socket_desc)
         }
 
         // d => download
-        if(client_command[0] == 'l')
+        if(client_command[0] == 'd')
         {
+            /* ask downloaded filename */
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
-            if((read_size = recv(sock, filename, MAX_FILENAME_LEN, 0)) > 0)  // get filename from client
+            if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
-                message_trim(filename);
+                // DEBUG - CHECK TRIMED FILE NAME SENDED BY CLIENT
+                printf("%s\n", filename);
+                
                 char segment[MAX_MESSAGE_LEN];
                 if(access(filename, F_OK) != -1)
                 {
-                    FILE* fp = fopen(filename, "r");
-                    while(fgets(segment, MAX_MESSAGE_LEN, fp) != NULL)
+                    /* Wait for TRANSFER signal */
+                    int transfer_flag = TRANSFER_WAIT;
+                    while(transfer_flag == TRANSFER_WAIT)
                     {
-                        write(sock, segment, strlen(segment));  // tranfer data to client until EOF
+                        printf("start wait\n");
+                        if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)
+                        {
+                            if(strcmp(client_message, "TRANSFER_OK") == 0)
+                                transfer_flag = TRANSFER_OK;
+                            else if(strcmp(client_message, "TRANSFER_DISCARD") == 0)
+                                transfer_flag = TRANSFER_DISCARD;
+                        }   
+                        else if(read_size == -1)
+                            perror("tranfer flag recv failed");
+                        else if(read_size == 0)
+                            break;
+                    }
+
+                    if(transfer_flag == TRANSFER_OK)
+                    {
+                        /* Start transfer data */
+                        FILE* fp = fopen(filename, "r");
+                        while(fgets(segment, MAX_MESSAGE_LEN, fp) != NULL)
+                        {
+                            write(sock, segment, strlen(segment));  // tranfer data to client until EOF
+                        }
                     }
                 }
                 else
@@ -284,7 +316,7 @@ void *connection_handler(void *socket_desc)
 
     close(sock);
 
-    //Free the socket pointer
+    /* Free private socket_desc */
     free(socket_desc);
 
     return 0;
