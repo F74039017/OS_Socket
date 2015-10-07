@@ -6,6 +6,7 @@
 #include <pthread.h> 
 #include <unistd.h>
 #include <dirent.h>
+#include <sys/stat.h>
 // #include <signal.h>
 
 #define TRUE 1
@@ -242,6 +243,9 @@ void *connection_handler(void *socket_desc)
         }
 
         // d => download
+        /*  1.  Normal send data
+        *   2.  Target file doesn't exist => discard
+        *   3.  Client doesn't allow to overwrite data => discard */
         if(client_command[0] == 'd')
         {
             /* ask downloaded filename */
@@ -255,6 +259,14 @@ void *connection_handler(void *socket_desc)
                 char segment[MAX_MESSAGE_LEN];
                 if(access(filename, F_OK) != -1)
                 {
+                    /* send file's size */
+                    struct stat st;
+                    int result = stat(filename, &st);
+                    long long fsize = st.st_size;
+                    sprintf(segment, "%lld", fsize);
+                    // printf("convert file size = %s\n", segment);
+                    write(sock, segment, strlen(segment));
+
                     /* Wait for TRANSFER signal */
                     int transfer_flag = TRANSFER_WAIT;
                     while(transfer_flag == TRANSFER_WAIT)
@@ -275,6 +287,7 @@ void *connection_handler(void *socket_desc)
 
                     if(transfer_flag == TRANSFER_OK)
                     {
+                        puts("ready to send the data");
                         /* Start transfer data */
                         FILE* fp = fopen(filename, "r");
                         while(fgets(segment, MAX_MESSAGE_LEN, fp) != NULL)
@@ -285,7 +298,7 @@ void *connection_handler(void *socket_desc)
                 }
                 else
                 {
-                    server_message = "File doesn't exist\n";
+                    server_message = "FILE_NOT_EXIST";
                     write(sock, server_message, strlen(server_message));
                 }
 

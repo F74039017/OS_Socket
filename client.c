@@ -5,7 +5,7 @@
 #include <arpa/inet.h> //inet_addr
 #include <pthread.h>
 #include <unistd.h>
-#include <semaphore.h>
+// #include <semaphore.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -27,11 +27,14 @@
 #define MESSAGE_MODE 1
 #define DOWNLOAD_MODE 2
 
-sem_t semaphore;
+pthread_mutex_t wr_mutex     = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  fs_cond   = PTHREAD_COND_INITIALIZER;
+pthread_cond_t  ow_cond   = PTHREAD_COND_INITIALIZER;
 
 int mode;
 char savedName[MAX_FILENAME_LEN];
 int trans_state;
+long long filesize;
 FILE *fp;
 
 void* receive_handler(void* );
@@ -78,7 +81,6 @@ int main(int argc , char *argv[])
     puts("Connected");
 
     /* init threads shared variable */
-    sem_init(&semaphore, 0, 1);
     trans_state = TRANSFER_WAIT;
     mode = MESSAGE_MODE;
 
@@ -141,26 +143,51 @@ void* receive_handler(void* socket_desc)
             fflush(stdout);
 
             // Response the filename in wthread.
-            // Block and wait for setting trans_state
-            sem_wait(&semaphore);
+            /* strat sync with wthread */
+            pthread_mutex_lock(&wr_mutex);
 
-            // DEBUG - CHECK RTHREAD GET IN SEMAPHORE
-            // printf("in semaphore\n");
+            /* Get file's size */
+            if((read_size = recv(sock, message, MAX_MESSAGE_LEN-1, 0))>0)
+            {
+                message[read_size] = '\0';
+                if(strcmp(message, "FILE_NOT_EXIST") == 0)
+                {
+                    puts("The file doesn't exist");
+                    trans_state = TRANSFER_DISCARD;
+                }
+                else
+                    filesize = atoll(message);
+                // printf("file size = %lld\n", filesize);
+            }
+            else
+            {
+                perror("Get file's size");
+                trans_state = TRANSFER_DISCARD;   
+            }
+            pthread_cond_signal(&fs_cond);
 
-            /* start to receive data */
+            /* wait for setting overwrite flag */
+            pthread_cond_wait(&ow_cond, &wr_mutex);
             if(trans_state == TRANSFER_OK)
             {
-                while((read_size = recv(sock, message, MAX_MESSAGE_LEN-1, 0)) > 0)
+                long long receive_cnt = 0;
+                /* start to receive data */
+                while(receive_cnt < filesize)
                 {
-                    //++ write output to the file
-                    // DEBUG - OUTPUT DATA TO STDIN
+                    read_size= recv(sock, message, MAX_MESSAGE_LEN-1, 0);
+                    receive_cnt += read_size;
+                    // DEBUG - CHECK RECEIVE SIZE
+                    // printf("receive size = %lld\n", receive_cnt);
                     message[read_size] = '\0';
-                    printf("%s", message);
-                    fflush(stdout);
+                    // DEBUG - OUTPUT DATA TO STDIN
+                    // printf("%s", message);
+                    fprintf(fp, "%s", message);
+                    fflush(fp);
                 }                  
             }
 
-            sem_post(&semaphore);
+            /* sync over */
+            pthread_mutex_unlock(&wr_mutex);
 
             /* transfer done. resume message mode */
             if(fp)
@@ -168,7 +195,8 @@ void* receive_handler(void* socket_desc)
 
             /* resume to message mode */
             mode = MESSAGE_MODE;
-            printf("mode change %d\n", mode);
+
+            puts("Transfer Finished!");
         }
     }
 
@@ -202,54 +230,64 @@ void* write_handler(void* socket_desc)
         
         if(message[0] == 'd')
         {
+            /* init trans_state */
+            trans_state = TRANSFER_OK;
+
             /* change to download mode => prevent from invoking other commands */
             mode = DOWNLOAD_MODE;
 
-            /* set semaphore to block rthread recv() */
-            sem_wait(&semaphore);
-            // DEBUG - CHECK SEMAPHORE IS LOCKED
-            // printf("semaphore lock\n");
+            /* start sync with rthread */
+            pthread_mutex_lock(&wr_mutex);
 
             /* write filename to server */
             fgets(savedName, MAX_FILENAME_LEN, stdin);
             savedName[strlen(savedName)-1] = '\0';  // trim
             write_size = write(sock, savedName, strlen(savedName));
+            /* wait rthread for getting file's size */
+            pthread_cond_wait(&fs_cond, &wr_mutex);
 
-            /* check existance and ask overwrite */
-            if(access(savedName, F_OK) != -1)
+            if(trans_state == TRANSFER_OK)
             {
-                int overwrite = FALSE;
+                /* check existance and ask overwrite */
+                if(access(savedName, F_OK) != -1)
+                {
+                    int overwrite = FALSE;
 
-                /* check overwrite */
-                printf("The file has already existed, do you want to overwrite?[y/n] ");
-                char check;
-                scanf("%c", &check);
-                if(check == 'y')
-                    overwrite = TRUE;
+                    /* check overwrite */
+                    printf("The file has already existed, do you want to overwrite?[y/n] ");
+                    char check;
+                    scanf("%c", &check);
+                    if(check == 'y')
+                        overwrite = TRUE;
 
-                /* send transfer flag to server */
-                if(overwrite)
+                    /* send transfer flag to server */
+                    if(overwrite)
+                    {
+                        fp = fopen(savedName, "w");
+                        trans_state = TRANSFER_OK;
+                        write(sock, "TRANSFER_OK", 11);
+                    }
+                    else
+                    {
+                        trans_state = TRANSFER_DISCARD;
+                        write(sock, "TRANSFER_DISCARD", 16);
+                    }
+
+                }
+                else
                 {
                     fp = fopen(savedName, "w");
                     trans_state = TRANSFER_OK;
                     write(sock, "TRANSFER_OK", 11);
                 }
-                else
-                {
-                    trans_state = TRANSFER_DISCARD;
-                    write(sock, "TRANSFER_DISCARD", 16);
-                }
-
+                pthread_cond_signal(&ow_cond);
             }
-            else
-            {
-                fp = fopen(savedName, "w");
-                trans_state = TRANSFER_OK;
-                write(sock, "TRANSFER_OK", 11);
-            }
+            // else
+            //     printf("DISCARD\n");    // DEBUG - CHECK NOT FILE CONDITION
+            pthread_cond_signal(&ow_cond);
 
-            /* trans_state setting finish */
-            sem_post(&semaphore);
+            /* sync over */
+            pthread_mutex_unlock(&wr_mutex);
         }
     }
 
