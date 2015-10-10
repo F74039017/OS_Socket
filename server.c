@@ -134,7 +134,6 @@ void *connection_handler(void *socket_desc)
         // DEBUG - CHECK RECEIVE COMMAND
         message_trim(client_command);
         printf("get command %s\n", client_command);
-        memset(filename, 0, sizeof(filename));  // prevent garbage character
 
 		//	c => create new file
 		if(strncmp(client_command, "create", 6) == 0)
@@ -160,6 +159,7 @@ void *connection_handler(void *socket_desc)
     			{
                     FILE* fp = fopen(filename, "w");  // create new file
                     fclose(fp);
+                    fp = NULL;
                     server_message = "Create successfully\n";
                     write(sock, server_message, strlen(server_message));
                 }
@@ -299,7 +299,7 @@ void *connection_handler(void *socket_desc)
                             perror("tranfer flag recv failed");
                         else if(read_size == 0)
                             break;
-                        printf("trans_state = %d\n", transfer_flag);
+                        // printf("trans_state = %d\n", transfer_flag);
                     }
 
 
@@ -393,7 +393,9 @@ void *connection_handler(void *socket_desc)
                         remove(filename);
                         rename(tempfilename, filename);
                         fclose(pfp);
-                        fclose(cfp);   
+                        pfp = NULL;
+                        fclose(cfp);  
+                        cfp = NULL; 
                     }
                     else
                         perror("Fail to get key");
@@ -470,7 +472,9 @@ void *connection_handler(void *socket_desc)
                         remove(filename);
                         rename(tempfilename, filename);
                         fclose(cfp);
+                        cfp = NULL;
                         fclose(rfp);   
+                        rfp = NULL;
                     }
                     else
                         perror("Fail to get key");
@@ -531,6 +535,10 @@ void *connection_handler(void *socket_desc)
             server_message = "No such command\n";
             write(sock, server_message, strlen(server_message));            
         }
+
+        memset(filename, 0, sizeof(filename));  // prevent garbage character
+        memset(client_command, 0, sizeof(client_command));
+        memset(client_message, 0, sizeof(client_message));
     }
      
     if(read_size == 0)

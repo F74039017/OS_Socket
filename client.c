@@ -194,6 +194,7 @@ void* receive_handler(void* socket_desc)
             /* transfer done. resume message mode */
             if(fp)
                 fclose(fp);
+            fp = NULL;
 
             /* resume to message mode */
             mode = MESSAGE_MODE;
@@ -288,7 +289,7 @@ void* write_handler(void* socket_desc)
             // else
             //     printf("DISCARD\n");    // DEBUG - CHECK NOT FILE CONDITION
             pthread_cond_signal(&ow_cond);
-
+ 
             /* sync over */
             pthread_mutex_unlock(&wr_mutex);
         }
