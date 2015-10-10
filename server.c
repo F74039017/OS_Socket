@@ -7,7 +7,11 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
-// #include <signal.h>
+#include <stdint.h>
+
+#include "aes.h"
+#define CBC 1
+#define ECB 1
 
 #define TRUE 1
 #define FALSE 0
@@ -32,6 +36,9 @@
 void *connection_handler(void *);
 void message_trim(char*);
 void signalHandler(int);
+
+// DEBUG - CHECK THE HEX OF THE STRING
+static void phex(uint8_t* str);
  
 int main(int argc , char *argv[])
 {
@@ -112,7 +119,7 @@ void message_trim(char* msg)
 void *connection_handler(void *socket_desc)
 {
     int sock = *(int*)socket_desc;
-    int read_size;
+    size_t read_size;
     char *server_message , client_command[MAX_COMMAND_LEN], client_message[MAX_MESSAGE_LEN];
     char filename[MAX_FILENAME_LEN];
      
@@ -129,7 +136,7 @@ void *connection_handler(void *socket_desc)
         printf("get command %s\n", client_command);
 
 		//	c => create new file
-		if(client_command[0] == 'c')
+		if(strcmp(client_command, "create") == 0)
 		{
 			server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -156,7 +163,7 @@ void *connection_handler(void *socket_desc)
 		}
 
         // e => edit
-        if(client_command[0] == 'e')
+        else if(strcmp(client_command, "edit") == 0)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -199,7 +206,7 @@ void *connection_handler(void *socket_desc)
         }
 
         // r => remove
-        if(client_command[0] == 'r')
+        else if(strcmp(client_command, "remove") == 0)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -221,7 +228,7 @@ void *connection_handler(void *socket_desc)
         }   
 
         // l => list directory
-        if(client_command[0] == 'l')
+        else if(strcmp(client_command, "list") == 0)
         {
             struct dirent **namelist;
             int n;
@@ -246,7 +253,7 @@ void *connection_handler(void *socket_desc)
         /*  1.  Normal send data
         *   2.  Target file doesn't exist => discard
         *   3.  Client doesn't allow to overwrite data => discard */
-        if(client_command[0] == 'd')
+        else if(strcmp(client_command, "download") == 0)
         {
             /* ask downloaded filename */
             server_message = "File name: ";
@@ -274,6 +281,7 @@ void *connection_handler(void *socket_desc)
                         printf("start wait\n");
                         if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)
                         {
+                            client_message[read_size] = '\0';
                             if(strcmp(client_message, "TRANSFER_OK") == 0)
                                 transfer_flag = TRANSFER_OK;
                             else if(strcmp(client_message, "TRANSFER_DISCARD") == 0)
@@ -283,7 +291,9 @@ void *connection_handler(void *socket_desc)
                             perror("tranfer flag recv failed");
                         else if(read_size == 0)
                             break;
+                        printf("trans_state = %d\n", transfer_flag);
                     }
+
 
                     if(transfer_flag == TRANSFER_OK)
                     {
@@ -307,14 +317,211 @@ void *connection_handler(void *socket_desc)
                 perror("recv failed");
         }
 
+        // a => AES128 ECB encrypt
+        else if(strcmp(client_command, "encrypt") == 0)
+        {
+            server_message = "File name: ";
+            write(sock, server_message, strlen(server_message));
+
+            if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
+            {
+                message_trim(filename);
+                /* concat .cip ext */
+                const char ext[] = ".cip";
+                char tempfilename[MAX_FILENAME_LEN];
+                strcpy(tempfilename, filename);
+                int namelen = strlen(filename);
+                strncpy(tempfilename+namelen, ext, 4);
+                // DEBUG - CHECK EXT FILENAME
+                printf("%s %s\n", filename, tempfilename);  
+
+
+                if(access(filename, F_OK) != -1)
+                {
+                    /* ask client for 16 bytes password */
+                    server_message = "Password <= 16 letters: ";
+                    write(sock, server_message, strlen(server_message));
+
+                    uint8_t key[16];
+                    if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)
+                    {
+                        /* discard letter if the length is more than 16 */
+                        strncpy(key, client_message, 16);
+                        if(strlen(client_message) != 10)
+                        {
+                            server_message = "Key too long.\nThe letters longer than 16 will be discarded.\n";
+                            write(sock, server_message, strlen(server_message));
+                        }
+
+                        FILE *pfp = fopen(filename, "r");
+                        FILE *cfp = fopen(tempfilename, "w");
+                        const segment_size = 16;
+                        uint8_t in[segment_size];
+                        uint8_t out[segment_size];
+
+                        /* write file size */
+                        uint64_t fsize;
+                        struct stat st;
+                        int result = stat(filename, &st);
+                        fsize = st.st_size;
+                        fwrite(&fsize, sizeof(uint64_t), 1, cfp);
+
+                        /* write contents */
+                        while(read_size = fread(in, sizeof(uint8_t), segment_size, pfp))
+                        {
+
+                            AES128_ECB_encrypt(in, key, out);
+                            
+                            // DEBUG - CHECK DECRYPT
+                            // printf("Plain text: \n");
+                            // phex(in);
+                            // phex(out);
+                            // AES128_ECB_decrypt(out, key, rec);
+                            // phex(rec);
+
+                            fwrite(out, sizeof(uint8_t), 16, cfp);
+                        }
+                        remove(filename);
+                        rename(tempfilename, filename);
+                        fclose(pfp);
+                        fclose(cfp);   
+                    }
+                    else
+                        perror("Fail to get key");
+                }
+                else
+                {
+                    server_message = "File doesn't exist\n";
+                    write(sock, server_message, strlen(server_message));
+                }
+            }
+            else
+                perror("recv failed");
+        }
+
+        // decrypt
+        // AES128 ECB encrypt
+        else if(strcmp(client_command, "decrypt") == 0)
+        {
+            server_message = "File name: ";
+            write(sock, server_message, strlen(server_message));
+
+            if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
+            {
+                message_trim(filename);
+                /* discard .cip ext */
+                const char ext[] = ".rec";
+                char tempfilename[MAX_FILENAME_LEN];
+                strcpy(tempfilename, filename);
+                int namelen = strlen(filename);
+                strncpy(tempfilename+namelen, ext, 4);
+                // DEBUG - CHECK EXT FILENAME
+                printf("%s %s\n", filename, tempfilename);  
+                
+                if(access(filename, F_OK) != -1)
+                {
+                    /* ask client for 16 bytes password */
+                    server_message = "Password <= 16 letters: ";
+                    write(sock, server_message, strlen(server_message));
+
+                    uint8_t key[16];
+                    if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)
+                    {
+                        /* discard letter if the length is more than 16 */
+                        strncpy(key, client_message, 16);
+                        if(strlen(client_message) != 10)
+                        {
+                            server_message = "Key too long.\nThe letters longer than 16 will be discarded.\n";
+                            write(sock, server_message, strlen(server_message));
+                        }
+
+                        FILE *cfp = fopen(filename, "rb");
+                        FILE *rfp = fopen(tempfilename, "wb");
+                        const segment_size = 16;
+                        uint8_t in[segment_size];
+                        uint8_t out[segment_size];
+
+                        /* get file size */
+                        uint64_t fsize;
+                        fread(&fsize, sizeof(uint64_t), 1, cfp);
+                        // printf("file size = %lld\n", fsize);
+                        uint64_t times = fsize/segment_size+1;
+                        // printf("times = %lld\n", times);
+                        int remainer = fsize-(times-1)*segment_size;
+                        // printf("remainer = %d\n", remainer);
+                        while(times--)
+                        {
+                            read_size = fread(in, sizeof(uint8_t), segment_size, cfp);
+                            AES128_ECB_decrypt(in, key, out);
+                            if(times)
+                                fwrite(out, sizeof(uint8_t), read_size, rfp);
+                            else
+                                fwrite(out, sizeof(uint8_t), remainer, rfp);
+                        }
+                        remove(filename);
+                        rename(tempfilename, filename);
+                        fclose(cfp);
+                        fclose(rfp);   
+                    }
+                    else
+                        perror("Fail to get key");
+                }
+                else
+                {
+                    server_message = "File doesn't exist\n";
+                    write(sock, server_message, strlen(server_message));
+                }
+            }
+            else
+                perror("recv failed");
+        }
+
+        // rename
+        else if(strcmp(client_command, "rename") == 0)
+        {
+            server_message = "Old and New file name. (Seperate by a blank)\n";
+            write(sock, server_message, strlen(server_message));
+
+            if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)  // get filename from client
+            {
+                message_trim(filename);
+                char newfilename[MAX_FILENAME_LEN];
+                sscanf(client_message, "%s %s", filename, newfilename);
+                //  DEBUG - CHEKC OLD AND NEW FILE NAME
+                // printf("checking\n");
+                // printf("%s %s\n", filename, newfilename);
+                if(access(filename, F_OK) != -1)
+                {
+                    if(rename(filename, newfilename) == 0)
+                        server_message = "Successfully\n";
+                    else
+                        server_message = "Fail\n";
+                    write(sock, server_message, strlen(server_message));
+                }
+                else
+                {
+                    server_message = "File doesn't exist\n";
+                    write(sock, server_message, strlen(server_message));
+                }
+            }
+            else
+                perror("recv failed");
+        }
+
 
 		// q => quit
-		if(client_command[0] == 'q')
+		else if(strcmp(client_command, "quit")  == 0)
 		{
 			server_message = "Bye Bye\n";
 			write(sock, server_message, strlen(server_message));
 			break;
 		}	
+
+        else
+        {
+            server_message = "No such command\n";
+            write(sock, server_message, strlen(server_message));            
+        }
     }
      
     if(read_size == 0)
@@ -334,3 +541,12 @@ void *connection_handler(void *socket_desc)
 
     return 0;
 } 
+
+static void phex(uint8_t* str)
+{
+    // original
+    unsigned char i;
+    for(i = 0; i < 16; ++i)
+        printf("%.2x ", str[i]);
+    printf("\n");
+}

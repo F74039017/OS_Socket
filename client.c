@@ -83,7 +83,7 @@ int main(int argc , char *argv[])
     /* init threads shared variable */
     trans_state = TRANSFER_WAIT;
     mode = MESSAGE_MODE;
-
+    
     pthread_t rthread;
     pthread_t wthread;
     int* rparam_desc = malloc(sizeof(int));
@@ -177,13 +177,14 @@ void* receive_handler(void* socket_desc)
                     read_size= recv(sock, message, MAX_MESSAGE_LEN-1, 0);
                     receive_cnt += read_size;
                     // DEBUG - CHECK RECEIVE SIZE
-                    // printf("receive size = %lld\n", receive_cnt);
+                    // printf("receive size/ filesize = %lld/ %lld\n", receive_cnt, filesize);
                     message[read_size] = '\0';
                     // DEBUG - OUTPUT DATA TO STDIN
                     // printf("%s", message);
                     fprintf(fp, "%s", message);
                     fflush(fp);
                 }                  
+                puts("Transfer Finished!");
             }
 
             /* sync over */
@@ -196,7 +197,6 @@ void* receive_handler(void* socket_desc)
             /* resume to message mode */
             mode = MESSAGE_MODE;
 
-            puts("Transfer Finished!");
         }
     }
 
@@ -228,7 +228,7 @@ void* write_handler(void* socket_desc)
         if(mode == MESSAGE_MODE)
             write_size = write(sock, message, strlen(message));
         
-        if(message[0] == 'd')
+        if(strncmp(message, "download", 8) == 0)
         {
             /* init trans_state */
             trans_state = TRANSFER_OK;
