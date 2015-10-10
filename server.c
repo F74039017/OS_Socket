@@ -26,7 +26,7 @@
 
 #define MAX_FILENAME_LEN 100
 #define MAX_COMMAND_LEN 50
-#define MAX_MESSAGE_LEN 1024
+#define MAX_MESSAGE_LEN 4096
 
 /* thansfer flags */
 #define TRANSFER_WAIT 0
@@ -134,9 +134,10 @@ void *connection_handler(void *socket_desc)
         // DEBUG - CHECK RECEIVE COMMAND
         message_trim(client_command);
         printf("get command %s\n", client_command);
+        memset(filename, 0, sizeof(filename));  // prevent garbage character
 
 		//	c => create new file
-		if(strcmp(client_command, "create") == 0)
+		if(strncmp(client_command, "create", 6) == 0)
 		{
 			server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -144,7 +145,13 @@ void *connection_handler(void *socket_desc)
             {
                 message_trim(filename);
                 /* check whether the file exists */
-    			if(access(filename, F_OK) != -1)
+                // BUG - IF FILE NAME IS EMPTY => CRASH
+                if(filename[0]=='\n')
+                {
+                    server_message = "File name can't be empty\n";
+                    write(sock, server_message, strlen(server_message));
+                }
+    			else if(access(filename, F_OK) != -1)
     			{
     				server_message = "The file has already existed!\n";
                     write(sock, server_message, strlen(server_message));
@@ -163,7 +170,8 @@ void *connection_handler(void *socket_desc)
 		}
 
         // e => edit
-        else if(strcmp(client_command, "edit") == 0)
+        // BUG - GET GARBAGE POSTFIX CHAR AFTER OTHER COMMAND
+        else if(strncmp(client_command, "edit", 4) == 0)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -172,7 +180,7 @@ void *connection_handler(void *socket_desc)
                 message_trim(filename);
                 if(access(filename, F_OK) != -1)
                 {
-                    server_message = "Stop and save by `EOF`.\n";
+                    server_message = "Stop and save by `EOF` in a line.\n";
                     write(sock, server_message, strlen(server_message));
 
                     FILE* fp = fopen(filename, "a+");
@@ -183,7 +191,7 @@ void *connection_handler(void *socket_desc)
                             client_message[read_size] = '\0';
                             if(strcmp(client_message, "`EOF`\n") == 0)
                                 break;
-                            printf("get message: %s\n", client_message);
+                            // printf("get message: %s\n", client_message);
                             fprintf(fp, "%s", client_message);
                             fflush(fp);
                         }
@@ -206,7 +214,7 @@ void *connection_handler(void *socket_desc)
         }
 
         // r => remove
-        else if(strcmp(client_command, "remove") == 0)
+        else if(strncmp(client_command, "remove", 6) == 0)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -228,7 +236,7 @@ void *connection_handler(void *socket_desc)
         }   
 
         // l => list directory
-        else if(strcmp(client_command, "list") == 0)
+        else if(strncmp(client_command, "list", 4) == 0)
         {
             struct dirent **namelist;
             int n;
@@ -253,7 +261,7 @@ void *connection_handler(void *socket_desc)
         /*  1.  Normal send data
         *   2.  Target file doesn't exist => discard
         *   3.  Client doesn't allow to overwrite data => discard */
-        else if(strcmp(client_command, "download") == 0)
+        else if(strncmp(client_command, "download", 8) == 0)
         {
             /* ask downloaded filename */
             server_message = "File name: ";
@@ -263,7 +271,7 @@ void *connection_handler(void *socket_desc)
                 // DEBUG - CHECK TRIMED FILE NAME SENDED BY CLIENT
                 printf("%s\n", filename);
                 
-                char segment[MAX_MESSAGE_LEN];
+                uint8_t segment[MAX_MESSAGE_LEN];
                 if(access(filename, F_OK) != -1)
                 {
                     /* send file's size */
@@ -300,9 +308,9 @@ void *connection_handler(void *socket_desc)
                         puts("ready to send the data");
                         /* Start transfer data */
                         FILE* fp = fopen(filename, "r");
-                        while(fgets(segment, MAX_MESSAGE_LEN, fp) != NULL)
+                        while(read_size = fread(segment, sizeof(uint8_t), MAX_MESSAGE_LEN-1, fp))
                         {
-                            write(sock, segment, strlen(segment));  // tranfer data to client until EOF
+                            write(sock, segment, read_size);  // tranfer data to client until EOF
                         }
                     }
                 }
@@ -317,8 +325,8 @@ void *connection_handler(void *socket_desc)
                 perror("recv failed");
         }
 
-        // a => AES128 ECB encrypt
-        else if(strcmp(client_command, "encrypt") == 0)
+        // AES128 ECB encrypt
+        else if(strncmp(client_command, "encrypt", 7) == 0)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -327,13 +335,13 @@ void *connection_handler(void *socket_desc)
             {
                 message_trim(filename);
                 /* concat .cip ext */
-                const char ext[] = ".cip";
+                const uint8_t ext[] = ".cip";
                 char tempfilename[MAX_FILENAME_LEN];
                 strcpy(tempfilename, filename);
                 int namelen = strlen(filename);
                 strncpy(tempfilename+namelen, ext, 4);
                 // DEBUG - CHECK EXT FILENAME
-                printf("%s %s\n", filename, tempfilename);  
+                // printf("%s %s\n", filename, tempfilename);  
 
 
                 if(access(filename, F_OK) != -1)
@@ -347,7 +355,8 @@ void *connection_handler(void *socket_desc)
                     {
                         /* discard letter if the length is more than 16 */
                         strncpy(key, client_message, 16);
-                        if(strlen(client_message) != 10)
+                        // printf("key length = %zu\n", strlen(client_message));
+                        if(strlen(client_message) > 16+1)
                         {
                             server_message = "Key too long.\nThe letters longer than 16 will be discarded.\n";
                             write(sock, server_message, strlen(server_message));
@@ -401,7 +410,7 @@ void *connection_handler(void *socket_desc)
 
         // decrypt
         // AES128 ECB encrypt
-        else if(strcmp(client_command, "decrypt") == 0)
+        else if(strncmp(client_command, "decrypt", 7) == 0)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
@@ -417,7 +426,7 @@ void *connection_handler(void *socket_desc)
                 strncpy(tempfilename+namelen, ext, 4);
                 // DEBUG - CHECK EXT FILENAME
                 printf("%s %s\n", filename, tempfilename);  
-                
+
                 if(access(filename, F_OK) != -1)
                 {
                     /* ask client for 16 bytes password */
@@ -429,7 +438,7 @@ void *connection_handler(void *socket_desc)
                     {
                         /* discard letter if the length is more than 16 */
                         strncpy(key, client_message, 16);
-                        if(strlen(client_message) != 10)
+                        if(strlen(client_message) > 16+1)
                         {
                             server_message = "Key too long.\nThe letters longer than 16 will be discarded.\n";
                             write(sock, server_message, strlen(server_message));
@@ -477,7 +486,7 @@ void *connection_handler(void *socket_desc)
         }
 
         // rename
-        else if(strcmp(client_command, "rename") == 0)
+        else if(strncmp(client_command, "rename", 6) == 0)
         {
             server_message = "Old and New file name. (Seperate by a blank)\n";
             write(sock, server_message, strlen(server_message));
@@ -510,7 +519,7 @@ void *connection_handler(void *socket_desc)
 
 
 		// q => quit
-		else if(strcmp(client_command, "quit")  == 0)
+		else if(strncmp(client_command, "quit", 4)  == 0)
 		{
 			server_message = "Bye Bye\n";
 			write(sock, server_message, strlen(server_message));

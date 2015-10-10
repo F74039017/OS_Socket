@@ -16,7 +16,7 @@
 #define DOWN_PTHREAD_FAIL 3
 
 #define MAX_FILENAME_LEN 100
-#define MAX_MESSAGE_LEN 1024
+#define MAX_MESSAGE_LEN 4096
 
 /* thansfer flags */
 #define TRANSFER_WAIT 0
@@ -83,7 +83,7 @@ int main(int argc , char *argv[])
     /* init threads shared variable */
     trans_state = TRANSFER_WAIT;
     mode = MESSAGE_MODE;
-    
+
     pthread_t rthread;
     pthread_t wthread;
     int* rparam_desc = malloc(sizeof(int));
@@ -172,16 +172,17 @@ void* receive_handler(void* socket_desc)
             {
                 long long receive_cnt = 0;
                 /* start to receive data */
+                uint8_t segment[MAX_MESSAGE_LEN];
                 while(receive_cnt < filesize)
                 {
-                    read_size= recv(sock, message, MAX_MESSAGE_LEN-1, 0);
+                    read_size= recv(sock, segment, MAX_MESSAGE_LEN-1, 0);
                     receive_cnt += read_size;
                     // DEBUG - CHECK RECEIVE SIZE
                     // printf("receive size/ filesize = %lld/ %lld\n", receive_cnt, filesize);
-                    message[read_size] = '\0';
+                    // segment[read_size] = '\0';
                     // DEBUG - OUTPUT DATA TO STDIN
                     // printf("%s", message);
-                    fprintf(fp, "%s", message);
+                    fwrite(segment, sizeof(uint8_t), read_size, fp);
                     fflush(fp);
                 }                  
                 puts("Transfer Finished!");
@@ -225,6 +226,8 @@ void* write_handler(void* socket_desc)
     {
         /* get command and send it to server */
         fgets(message, MAX_MESSAGE_LEN, stdin);
+        if(message[0] == '\n')
+            continue;
         if(mode == MESSAGE_MODE)
             write_size = write(sock, message, strlen(message));
         
