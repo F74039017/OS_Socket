@@ -34,7 +34,6 @@
 #define TRANSFER_DISCARD 2
  
 void *connection_handler(void *);
-void message_trim(char*);
 void signalHandler(int);
 
 // DEBUG - CHECK THE HEX OF THE STRING
@@ -108,12 +107,7 @@ int main(int argc , char *argv[])
 //     }
 // }
 
-/* remove trailing newline character */
-void message_trim(char* msg)
-{
-    int len = strlen(msg);
-    msg[len-1] = '\0';
-}
+
 
 /* Handle client's process */
 void *connection_handler(void *socket_desc)
@@ -132,7 +126,6 @@ void *connection_handler(void *socket_desc)
     while( (read_size = recv(sock , client_command , MAX_COMMAND_LEN-1 , 0)) > 0 )
     {
         // DEBUG - CHECK RECEIVE COMMAND
-        message_trim(client_command);
         printf("get command %s\n", client_command);
 
 		//	c => create new file
@@ -142,7 +135,6 @@ void *connection_handler(void *socket_desc)
             write(sock, server_message, strlen(server_message));
 			if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
-                message_trim(filename);
                 /* check whether the file exists */
                 // BUG - IF FILE NAME IS EMPTY => CRASH
                 if(filename[0]=='\n')
@@ -177,7 +169,6 @@ void *connection_handler(void *socket_desc)
             write(sock, server_message, strlen(server_message));
             if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
-                message_trim(filename);
                 if(access(filename, F_OK) != -1)
                 {
                     server_message = "Stop and save by `EOF` in a line.\n";
@@ -188,7 +179,8 @@ void *connection_handler(void *socket_desc)
                     {
                         while((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)
                         {
-                            client_message[read_size] = '\0';
+                            client_message[read_size] = '\n';
+                            client_message[read_size+1] = '\0';
                             if(strcmp(client_message, "`EOF`\n") == 0)
                                 break;
                             // printf("get message: %s\n", client_message);
@@ -213,14 +205,40 @@ void *connection_handler(void *socket_desc)
 
         }
 
-        // r => remove
-        else if(strncmp(client_command, "remove", 6) == 0)
+        // cat
+        else if(strncmp(client_command, "cat", 3) == 0)
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
             if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
-                message_trim(filename);
+                if(access(filename, F_OK) != -1)
+                {
+                    FILE* fp = fopen(filename, "r");
+                    char segment[MAX_MESSAGE_LEN];
+                    while(fgets(segment, MAX_MESSAGE_LEN, fp))
+                    {
+                        segment[strlen(segment)] = '\0';
+                        write(sock, segment, strlen(segment));
+                    }
+                }
+                else
+                {
+                    server_message = "File doesn't exist\n";
+                    write(sock, server_message, strlen(server_message));
+                }
+            }
+            else
+                perror("recv failed");
+        }
+
+        // r => remove
+        else if(!(strncmp(client_command, "remove", 6)&&strncmp(client_command, "rm", 2)))
+        {
+            server_message = "File name: ";
+            write(sock, server_message, strlen(server_message));
+            if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
+            {
                 if(access(filename, F_OK) != -1)
                 {
                     remove(filename);
@@ -236,7 +254,7 @@ void *connection_handler(void *socket_desc)
         }   
 
         // l => list directory
-        else if(strncmp(client_command, "list", 4) == 0)
+        else if(!(strncmp(client_command, "list", 4)&&strncmp(client_command, "ls", 2)))
         {
             struct dirent **namelist;
             int n;
@@ -261,7 +279,7 @@ void *connection_handler(void *socket_desc)
         /*  1.  Normal send data
         *   2.  Target file doesn't exist => discard
         *   3.  Client doesn't allow to overwrite data => discard */
-        else if(strncmp(client_command, "download", 8) == 0)
+        else if(!(strncmp(client_command, "download", 8)&&strncmp(client_command, "dl", 2)))
         {
             /* ask downloaded filename */
             server_message = "File name: ";
@@ -316,7 +334,7 @@ void *connection_handler(void *socket_desc)
                 }
                 else
                 {
-                    server_message = "FILE_NOT_EXIST";
+                    server_message = "FILE_NOT_EXIST";  // transfer flag
                     write(sock, server_message, strlen(server_message));
                 }
 
@@ -326,14 +344,13 @@ void *connection_handler(void *socket_desc)
         }
 
         // AES128 ECB encrypt
-        else if(strncmp(client_command, "encrypt", 7) == 0)
+        else if(!(strncmp(client_command, "encrypt", 7)&&strncmp(client_command, "en", 2)))
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
 
             if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
-                message_trim(filename);
                 /* concat .cip ext */
                 const uint8_t ext[] = ".cip";
                 char tempfilename[MAX_FILENAME_LEN];
@@ -412,14 +429,13 @@ void *connection_handler(void *socket_desc)
 
         // decrypt
         // AES128 ECB encrypt
-        else if(strncmp(client_command, "decrypt", 7) == 0)
+        else if(!(strncmp(client_command, "decrypt", 7)&&strncmp(client_command, "de", 2)))
         {
             server_message = "File name: ";
             write(sock, server_message, strlen(server_message));
 
             if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
-                message_trim(filename);
                 /* discard .cip ext */
                 const char ext[] = ".rec";
                 char tempfilename[MAX_FILENAME_LEN];
@@ -497,7 +513,6 @@ void *connection_handler(void *socket_desc)
 
             if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)  // get filename from client
             {
-                message_trim(filename);
                 char newfilename[MAX_FILENAME_LEN];
                 sscanf(client_message, "%s %s", filename, newfilename);
                 //  DEBUG - CHEKC OLD AND NEW FILE NAME
@@ -523,7 +538,7 @@ void *connection_handler(void *socket_desc)
 
 
 		// q => quit
-		else if(strncmp(client_command, "quit", 4)  == 0)
+		else if(!(strncmp(client_command, "quit", 4)&&strncmp(client_command, "bye", 3)))
 		{
 			server_message = "Bye Bye\n";
 			write(sock, server_message, strlen(server_message));

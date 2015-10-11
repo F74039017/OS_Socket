@@ -16,6 +16,7 @@
 #define DOWN_PTHREAD_FAIL 3
 
 #define MAX_FILENAME_LEN 100
+#define MAX_COMMAND_LEN 50
 #define MAX_MESSAGE_LEN 4096
 
 /* thansfer flags */
@@ -27,10 +28,27 @@
 #define MESSAGE_MODE 1
 #define DOWNLOAD_MODE 2
 
-pthread_mutex_t wr_mutex     = PTHREAD_MUTEX_INITIALIZER;
+// alias
+#define COMMAND_NUM 10
+#define MAX_ALIAS 50
+struct _alias
+{
+    char cmd[MAX_COMMAND_LEN];
+    char ali[MAX_COMMAND_LEN];
+}alias_list[MAX_ALIAS];
+
+int alias_cnt;
+// enum {CREATE, EDIT, CAT, REMOVE, LIST, DOWNLOAD, ENCRYPT, DECRYPT, RENAME, QUIT};
+const char alias_file_name[] = ".alias";
+const char *command_list[COMMAND_NUM] = {"create", "edit", "cat", "remove", "list", "download", "encrypt", "decrypt", "rename", "quit"};
+
+
+// sync wthread and rthread
+pthread_mutex_t wr_mutex  = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  fs_cond   = PTHREAD_COND_INITIALIZER;
 pthread_cond_t  ow_cond   = PTHREAD_COND_INITIALIZER;
 
+// download variable
 int mode;
 char savedName[MAX_FILENAME_LEN];
 int trans_state;
@@ -39,6 +57,11 @@ FILE *fp;
 
 void* receive_handler(void* );
 void* write_handler(void* );
+void initAlias();
+void addAlias(const char*, const char*);
+void showAlias();
+void convertAlias(char* );
+void message_trim(char* );
 
 int main(int argc , char *argv[])
 {
@@ -47,7 +70,10 @@ int main(int argc , char *argv[])
     int port;
     struct sockaddr_in server;
 
-    if(argc != 3)
+    initAlias();
+    // showAlias();
+
+    if(argc == 1)
     {
         puts("Use default ip: localhost, port: 8888");
         ip = "127.0.0.1";
@@ -58,7 +84,14 @@ int main(int argc , char *argv[])
         if(argv[1]=="localhost")
             ip = "127.0.0.1";
         ip = argv[1];
-        port = atoi(argv[2]);
+
+        if(argc==2)
+        {
+            puts("Use default port: 8888");
+            port = 8888;
+        }
+        else
+            port = atoi(argv[2]);
     }
      
     // Create socket
@@ -109,6 +142,96 @@ int main(int argc , char *argv[])
 
     close(socket_desc);
     return 0;
+}
+
+void initAlias()
+{   
+    memset(alias_list, 0, sizeof(alias_list));
+    alias_cnt = 0;
+
+    FILE* afp = fopen(alias_file_name, "r+");
+    if(afp)
+    {   
+        char temp[MAX_COMMAND_LEN*2+1];
+        char cmd[MAX_COMMAND_LEN], ali[MAX_COMMAND_LEN];
+        while(fgets(temp, MAX_COMMAND_LEN*2+1, afp))
+        {
+            sscanf(temp, "%s %s", cmd, ali);
+
+            int i;
+            for(i=0; i<COMMAND_NUM; i++)
+            {
+                if(strcmp(command_list[i], cmd) == 0)
+                {
+                    strcpy(alias_list[alias_cnt].cmd, cmd);
+                    strcpy(alias_list[alias_cnt].ali, ali);
+                    alias_cnt++;
+                }
+            }
+        }
+        fclose(afp);
+        afp = NULL;
+    }
+    else
+    {
+        afp = fopen(alias_file_name, "w");
+        fclose(afp);
+        afp = NULL;   
+    }
+}
+
+void addAlias(const char* cmd, const char* ali)
+{
+    /* check command existence */
+    int flag = FALSE;
+    int i;
+    for(i=0; i<COMMAND_NUM; i++)
+        if(strcmp(command_list[i], cmd) == 0)
+            flag = TRUE;
+
+    /* add alias */
+    if(!flag)
+        printf("Can't find command: \"%s\"\n", cmd);
+    else
+    {
+        FILE* afp = fopen(alias_file_name, "a");
+        fprintf(afp, "%s %s\n", cmd, ali);
+        fclose(afp);
+        afp = NULL;
+
+        printf("add alias %s = %s\n", ali, cmd);
+
+        strcpy(alias_list[alias_cnt].cmd, cmd);
+        strcpy(alias_list[alias_cnt].ali, ali);
+        alias_cnt++;
+    }
+}
+
+void showAlias()
+{
+    int i;
+    for(i=0; i<alias_cnt; i++)
+        printf("%s = %s\n", alias_list[i].ali, alias_list[i].cmd);
+}
+
+void convertAlias(char *cmd)
+{
+    int i;
+    for(i=0; i<alias_cnt; i++)
+    {
+        if(strcmp(alias_list[i].ali, cmd) == 0)
+        {
+            strcpy(cmd, alias_list[i].cmd);
+            return;
+        }
+    }
+}
+
+/* remove trailing newline character */
+void message_trim(char* msg)
+{
+    int len = strlen(msg);
+    msg[len-1] = '\0';
 }
 
 void* receive_handler(void* socket_desc)
@@ -229,10 +352,25 @@ void* write_handler(void* socket_desc)
         fgets(message, MAX_MESSAGE_LEN, stdin);
         if(message[0] == '\n')
             continue;
+        message_trim(message);
+        /* local command */
+        if(!strncmp(message, "alias", 5))
+        {
+            char cmd[MAX_COMMAND_LEN], ali[MAX_COMMAND_LEN];
+            if(sscanf(message, "alias %s %s", cmd, ali) == 2)
+                addAlias(cmd, ali);
+            else
+                printf("Format Error: alias <command> <alias>\n");
+            continue;
+        }
+
+        /* remote command */
         if(mode == MESSAGE_MODE)
+        {
+            convertAlias(message);
             write_size = write(sock, message, strlen(message));
-        
-        if(strncmp(message, "download", 8) == 0)
+        }
+        if(!(strncmp(message, "download", 8)&&strncmp(message, "dl", 2)))
         {
             /* init trans_state */
             trans_state = TRANSFER_OK;
@@ -245,7 +383,7 @@ void* write_handler(void* socket_desc)
 
             /* write filename to server */
             fgets(savedName, MAX_FILENAME_LEN, stdin);
-            savedName[strlen(savedName)-1] = '\0';  // trim
+            message_trim(savedName);
             write_size = write(sock, savedName, strlen(savedName));
             /* wait rthread for getting file's size */
             pthread_cond_wait(&fs_cond, &wr_mutex);
