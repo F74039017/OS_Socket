@@ -107,8 +107,6 @@ int main(int argc , char *argv[])
 //     }
 // }
 
-
-
 /* Handle client's process */
 void *connection_handler(void *socket_desc)
 {
@@ -118,9 +116,18 @@ void *connection_handler(void *socket_desc)
     char filename[MAX_FILENAME_LEN];
      
 	// Welcome message
-    server_message = "Welcome to remote editor.\nPlease type the command you need.\n";
+    server_message = "#############################################\n";
     write(sock , server_message , strlen(server_message));
-     
+    server_message = "Welcome to Internet editor\n";
+    write(sock , server_message , strlen(server_message));
+    server_message = "#############################################\n";
+    write(sock , server_message , strlen(server_message));
+    server_message = "There are some options you can choose below:\n";
+    write(sock , server_message , strlen(server_message));
+    server_message = "#############################################\n";
+    write(sock , server_message , strlen(server_message));
+    server_message = "1. create\n2. edit\n3. cat\n4. remove (rm)\n5. list (ls)\n6. download (dl)\n7. encrypt (en)\n8. decrypt (de)\n9. rename\n10. quit (bye)\n11. alias <command> <alias>\n\n";
+    write(sock , server_message , strlen(server_message));
 	
 	// Get command from user and response
     while( (read_size = recv(sock , client_command , MAX_COMMAND_LEN-1 , 0)) > 0 )
@@ -304,7 +311,7 @@ void *connection_handler(void *socket_desc)
                     int transfer_flag = TRANSFER_WAIT;
                     while(transfer_flag == TRANSFER_WAIT)
                     {
-                        printf("start wait\n");
+                        // printf("start wait\n");
                         if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0)
                         {
                             client_message[read_size] = '\0';
@@ -323,7 +330,7 @@ void *connection_handler(void *socket_desc)
 
                     if(transfer_flag == TRANSFER_OK)
                     {
-                        puts("ready to send the data");
+                        // puts("ready to send the data");
                         /* Start transfer data */
                         FILE* fp = fopen(filename, "r");
                         while(read_size = fread(segment, sizeof(uint8_t), MAX_MESSAGE_LEN-1, fp))
@@ -356,7 +363,7 @@ void *connection_handler(void *socket_desc)
                 char tempfilename[MAX_FILENAME_LEN];
                 strcpy(tempfilename, filename);
                 int namelen = strlen(filename);
-                strncpy(tempfilename+namelen, ext, 4);
+                strncpy(tempfilename+namelen, ext, 5);
                 // DEBUG - CHECK EXT FILENAME
                 // printf("%s %s\n", filename, tempfilename);  
 
@@ -441,9 +448,9 @@ void *connection_handler(void *socket_desc)
                 char tempfilename[MAX_FILENAME_LEN];
                 strcpy(tempfilename, filename);
                 int namelen = strlen(filename);
-                strncpy(tempfilename+namelen, ext, 4);
+                strncpy(tempfilename+namelen, ext, 5);
                 // DEBUG - CHECK EXT FILENAME
-                printf("%s %s\n", filename, tempfilename);  
+                // printf("%s %s\n", filename, tempfilename);  
 
                 if(access(filename, F_OK) != -1)
                 {

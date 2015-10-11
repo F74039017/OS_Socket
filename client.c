@@ -199,7 +199,7 @@ void addAlias(const char* cmd, const char* ali)
         fclose(afp);
         afp = NULL;
 
-        printf("add alias %s = %s\n", ali, cmd);
+        // printf("add alias %s = %s\n", ali, cmd);
 
         strcpy(alias_list[alias_cnt].cmd, cmd);
         strcpy(alias_list[alias_cnt].ali, ali);
