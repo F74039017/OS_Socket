@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <stdint.h>
+#include <signal.h>
 
 #include "aes.h"
 #define CBC 1
@@ -32,15 +33,41 @@
 #define TRANSFER_WAIT 0
 #define TRANSFER_OK 1
 #define TRANSFER_DISCARD 2
+
+struct node
+{
+    int desc;
+    int isDownload;
+    struct node *next;
+}*head;
+
+void message_trim(char*);
  
 void *connection_handler(void *);
-void signalHandler(int);
+void *server_cmd_handler();
+
+// linked list handle client sockets
+int client_cnt = 0;
+void append(int);
+void addBeginning(int);
+void addAfter(int, int);
+void insert(int);
+int delete(int);
+
+void setDownloadFlag(int, int);
+void send2All(char *);
+
+// clear before exit
+void clean();
+void intHandler(int sig);
 
 // DEBUG - CHECK THE HEX OF THE STRING
-static void phex(uint8_t* str);
+// static void phex(uint8_t* str);
  
 int main(int argc , char *argv[])
 {
+    signal(SIGINT, intHandler);
+
 	/* server's and client's file descriptor => -1 means error */
     int ss_desc , cs_desc;
     struct sockaddr_in server , client;
@@ -53,6 +80,11 @@ int main(int argc , char *argv[])
         fprintf(stderr, "Fail to create server's socket");
 		return SERVER_SOCKET_FAIL;
 	}
+
+    // set reuse address => avoid TCP TIME_WAIT session
+    /* Enable address reuse */
+    int on = 1;
+    setsockopt( ss_desc, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on) );
      
     // Server socket info. sockaddr_in struct
     server.sin_family = AF_INET;
@@ -66,6 +98,14 @@ int main(int argc , char *argv[])
         return SERVER_BIND_FAIL;
     }
     puts("bind done");
+
+    // Create pthread for broadcast
+    pthread_t thread;
+    if( pthread_create( &thread , NULL ,  server_cmd_handler , NULL) < 0)
+    {
+        perror("Fail to create broadcast thread");
+        return PTHREAD_CREATE_FAIL;
+    }
      
     // Listen. Accept at most MAX_CLIENT clients
     listen(ss_desc , MAX_CLIENT);
@@ -75,7 +115,8 @@ int main(int argc , char *argv[])
     int structlen = sizeof(struct sockaddr_in);
     while( (cs_desc = accept(ss_desc, (struct sockaddr *)&client, (socklen_t*)&structlen)) )
     {
-        puts("Connection accepted");
+        //  DEBUG - CHECK CLIENT DESC
+        printf("Client %d connect!!\n", cs_desc);
          
 		// Create pthread for each client
         pthread_t thread;
@@ -98,15 +139,6 @@ int main(int argc , char *argv[])
     return 0;
 }
 
-/* Ctrl-C => close socket before exit */
-// void signalHandler(int sig)
-// {
-//     if(sig == SIGNIT)
-//     {
-        
-//     }
-// }
-
 /* Handle client's process */
 void *connection_handler(void *socket_desc)
 {
@@ -114,6 +146,10 @@ void *connection_handler(void *socket_desc)
     size_t read_size;
     char *server_message , client_command[MAX_COMMAND_LEN], client_message[MAX_MESSAGE_LEN];
     char filename[MAX_FILENAME_LEN];
+
+    // add client list
+    client_cnt++;
+    insert(sock);
      
 	// Welcome message
     server_message = "#############################################\n";
@@ -330,6 +366,7 @@ void *connection_handler(void *socket_desc)
 
                     if(transfer_flag == TRANSFER_OK)
                     {
+                        setDownloadFlag(sock, TRUE);
                         // puts("ready to send the data");
                         /* Start transfer data */
                         FILE* fp = fopen(filename, "r");
@@ -337,6 +374,7 @@ void *connection_handler(void *socket_desc)
                         {
                             write(sock, segment, read_size);  // tranfer data to client until EOF
                         }
+                        setDownloadFlag(sock, FALSE);
                     }
                 }
                 else
@@ -565,27 +603,281 @@ void *connection_handler(void *socket_desc)
      
     if(read_size == 0)
     {
-        puts("Client disconnected");
+        printf("Client %d disconnected\n", sock);
         fflush(stdout);
     }
     else if(read_size == -1)
     {
-        perror("recv failed");
+        // perror("recv failed");
     }
 
+    
     close(sock);
-
+    /* delete client list */
+    delete(sock);
+    client_cnt--;
     /* Free private socket_desc */
     free(socket_desc);
 
     return 0;
 } 
 
-static void phex(uint8_t* str)
+void *server_cmd_handler()
 {
-    // original
-    unsigned char i;
-    for(i = 0; i < 16; ++i)
-        printf("%.2x ", str[i]);
-    printf("\n");
+    /* Server welcome message */
+    puts("#############################################");
+    puts("1. broadcast (bc)");
+    puts("2. showip (si)");
+    puts("3. shutdown [sec] (sd)");
+    puts("#############################################");
+
+    char message[MAX_MESSAGE_LEN], command[MAX_COMMAND_LEN];
+    while(1)
+    {
+        fgets(command, MAX_COMMAND_LEN-1, stdin);
+        message_trim(command);
+
+        //  broadcast. If client is downloading then not receive
+        if(!(strncmp(command, "bc", 2)&&strncmp(command, "broadcast", 9)))
+        {
+            printf("Message: \n");
+            fgets(message, MAX_MESSAGE_LEN-1, stdin);
+            message[strlen(message)] = '\0';
+
+            send2All(message);            
+        }
+        else if(!(strncmp(command, "shutdown", 8)&&strncmp(command, "sd", 2)))
+        {
+            char dummy[8];
+            unsigned t;
+            if(sscanf(command, "%s %u", dummy, &t)==2)
+            {
+                sprintf(message, "Notice: Server Will shutdown after %u second\n", t);
+                send2All(message);
+                while(t)
+                {
+                    // count down
+                    if(t<=10)
+                    {
+                        printf("%u ", t);
+                        fflush(stdout);
+                    }
+                    t--;
+                    sleep(1);
+                }
+                puts("");
+                clean(head);
+                exit(0);
+            }
+        }
+        else if(!(strncmp(command, "showip", 6)&&strncmp(command, "si", 2)))
+        {
+            socklen_t len;
+            struct sockaddr_storage addr;
+            char ipstr[INET_ADDRSTRLEN];
+            int port;
+
+            struct sockaddr_in *s;
+            struct node *temp = head;
+            // BUG - MUST GET FIRST FOR GARBAGE
+            if(temp!=NULL)
+                getpeername(temp->desc, (struct sockaddr*)&addr, &len);
+            while(temp!=NULL)
+            {
+                getpeername(temp->desc, (struct sockaddr*)&addr, &len);
+                s = (struct sockaddr_in *)&addr;
+                port = ntohs(s->sin_port);
+                inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
+
+                printf("%s:%d\n", ipstr, port);
+                temp = temp->next;
+            }
+        }
+        else
+            printf("No such command\n");
+    }
+}
+
+void send2All(char *message)
+{
+    struct node* temp = head;
+    while(temp!=NULL)
+    {
+        if(!temp->isDownload)
+            write(temp->desc, message, strlen(message));
+
+        temp = temp->next;
+    }
+}
+
+/* remove trailing newline character */
+void message_trim(char* msg)
+{
+    int len = strlen(msg);
+    msg[len-1] = '\0';
+}
+
+// static void phex(uint8_t* str)
+// {
+//     // original
+//     unsigned char i;
+//     for(i = 0; i < 16; ++i)
+//         printf("%.2x ", str[i]);
+//     printf("\n");
+// }
+
+void setDownloadFlag(int desc, int flag)
+{
+    int cnt = 0;
+    struct node *temp;
+    temp = head;
+    if(temp == NULL)
+        return;
+    else
+    {
+        while(temp!=NULL)
+        {
+            if(temp->desc==desc)
+            {
+                temp->isDownload = flag;
+                return;
+            }
+            else
+                temp = temp->next;
+        }
+    }    
+}
+ 
+void append(int desc)
+{
+    struct node *temp,*right;
+    /* create new node */
+    temp = (struct node *)malloc(sizeof(struct node));
+    temp->desc = desc;
+    temp->isDownload = FALSE;
+    /* move to the end */
+    right=(struct node *)head;
+    while(right->next != NULL)
+        right=right->next;
+
+    right->next = temp;
+    temp->next = NULL;
+}
+
+void addBeginning(int desc)
+{
+    struct node *temp;
+    temp = (struct node *)malloc(sizeof(struct node));
+    temp->desc = desc;
+    temp->isDownload = FALSE;
+    if(head == NULL)
+    {
+        head = temp;
+        head->next = NULL;
+    }
+    else
+    {
+        temp->next = head;
+        head = temp;
+    }
+}
+
+
+void addAfter(int desc, int loc)
+{
+    int i;
+    struct node *temp,*left,*right;
+    right=head;
+    for(i=1;i<loc;i++)
+    {
+        left=right;
+        right=right->next;
+    }
+    temp=(struct node *)malloc(sizeof(struct node));
+    temp->desc=desc;
+    temp->isDownload = FALSE;
+    left->next=temp;
+    left=temp;
+    left->next=right;
+    return;
+}
+ 
+ 
+ 
+void insert(int desc)
+{
+    int cnt = 0;
+    struct node *temp;
+    temp = head;
+    if(temp == NULL)
+        addBeginning(desc);
+    else
+    {
+        while(temp!=NULL)
+        {
+            if(temp->desc<desc)
+                cnt++;
+            temp=temp->next;
+        }
+        if(cnt==0)
+            addBeginning(desc);
+        else if(cnt<client_cnt)
+            addAfter(desc,++cnt);
+        else
+            append(desc);
+    }
+
+    client_cnt++;
+}
+ 
+// return whether the element exist
+int delete(int desc)
+{
+    struct node *temp, *prev;
+    temp = head;
+    while(temp!=NULL)
+    {
+        if(temp->desc==desc)
+        {
+            if(temp==head)
+            {
+                head=temp->next;
+                free(temp);
+                client_cnt--;
+                return 1;
+            }
+            else
+            {
+                prev->next=temp->next;
+                free(temp);
+                client_cnt--;
+                return 1;
+            }
+        }
+        else
+        {
+            prev=temp;
+            temp= temp->next;
+        }
+    }
+    return 0;
+}
+
+void clean(struct node* cur)
+{
+    if(cur==NULL)
+    {
+        client_cnt = 0;
+        head = NULL;
+        return;
+    }
+    clean(cur->next);
+    close(cur->desc);
+    free(cur);
+}
+
+void intHandler(int sig)
+{
+    clean(head);
+    exit(0);
 }
