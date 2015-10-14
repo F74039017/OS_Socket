@@ -22,7 +22,7 @@
 #define SERVER_BIND_FAIL 2
 #define PTHREAD_CREATE_FAIL 3
 
-#define SERVER_PORT 8888
+#define DEFAULT_PORT 8888
 #define MAX_CLIENT 3
 
 #define MAX_FILENAME_LEN 100
@@ -37,7 +37,7 @@
 struct node
 {
     int desc;
-    int isDownload;
+    int isTransfer;
     struct node *next;
 }*head;
 
@@ -54,10 +54,11 @@ void addAfter(int, int);
 void insert(int);
 int delete(int);
 
-void setDownloadFlag(int, int);
+void setTransferFlag(int, int);
 void send2All(char *);
 
 // clear before exit
+void ShutDown(unsigned);
 void clean();
 void intHandler(int sig);
 
@@ -85,11 +86,18 @@ int main(int argc , char *argv[])
     /* Enable address reuse */
     int on = 1;
     setsockopt( ss_desc, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on) );
-     
+
+    /* Set port */
+    int port = DEFAULT_PORT;
+    if(argc==2)
+        port = atoi(argv[1]);
+    else
+        printf("Use default port: %d\n", DEFAULT_PORT);
+
     // Server socket info. sockaddr_in struct
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = INADDR_ANY;
-    server.sin_port = htons( SERVER_PORT );
+    server.sin_port = htons( port );
      
     // Bind
     if( bind(ss_desc, (struct sockaddr *)&server, sizeof(server)) < 0)
@@ -116,7 +124,7 @@ int main(int argc , char *argv[])
     while( (cs_desc = accept(ss_desc, (struct sockaddr *)&client, (socklen_t*)&structlen)) )
     {
         //  DEBUG - CHECK CLIENT DESC
-        printf("Client %d connect!!\n", cs_desc);
+        // printf("Client %d connect!!\n", cs_desc);
          
 		// Create pthread for each client
         pthread_t thread;
@@ -158,18 +166,18 @@ void *connection_handler(void *socket_desc)
     write(sock , server_message , strlen(server_message));
     server_message = "#############################################\n";
     write(sock , server_message , strlen(server_message));
-    server_message = "There are some options you can choose below:\n";
+    // server_message = "There are some options you can choose below:\n";
+    // write(sock , server_message , strlen(server_message));
+    server_message = "1. create\n2. edit\n3. cat\n4. download (dl)\n5. list (ls)\n6. encrypt (en)\n7. decrypt (de)\n8. rename\n9. remove (rm)\n10. put\n11. alias <command> <alias>\n12. quit (bye)\n";
     write(sock , server_message , strlen(server_message));
-    server_message = "#############################################\n";
-    write(sock , server_message , strlen(server_message));
-    server_message = "1. create\n2. edit\n3. cat\n4. remove (rm)\n5. list (ls)\n6. download (dl)\n7. encrypt (en)\n8. decrypt (de)\n9. rename\n10. quit (bye)\n11. alias <command> <alias>\n\n";
+    server_message = "#############################################\n\n";
     write(sock , server_message , strlen(server_message));
 	
 	// Get command from user and response
     while( (read_size = recv(sock , client_command , MAX_COMMAND_LEN-1 , 0)) > 0 )
     {
         // DEBUG - CHECK RECEIVE COMMAND
-        printf("get command %s\n", client_command);
+        // printf("get command %s\n", client_command);
 
 		//	c => create new file
 		if(strncmp(client_command, "create", 6) == 0)
@@ -330,7 +338,7 @@ void *connection_handler(void *socket_desc)
             if((read_size = recv(sock, filename, MAX_FILENAME_LEN-1, 0)) > 0)  // get filename from client
             {
                 // DEBUG - CHECK TRIMED FILE NAME SENDED BY CLIENT
-                printf("%s\n", filename);
+                // printf("%s\n", filename);
                 
                 uint8_t segment[MAX_MESSAGE_LEN];
                 if(access(filename, F_OK) != -1)
@@ -366,7 +374,7 @@ void *connection_handler(void *socket_desc)
 
                     if(transfer_flag == TRANSFER_OK)
                     {
-                        setDownloadFlag(sock, TRUE);
+                        setTransferFlag(sock, TRUE);
                         // puts("ready to send the data");
                         /* Start transfer data */
                         FILE* fp = fopen(filename, "r");
@@ -374,7 +382,7 @@ void *connection_handler(void *socket_desc)
                         {
                             write(sock, segment, read_size);  // tranfer data to client until EOF
                         }
-                        setDownloadFlag(sock, FALSE);
+                        setTransferFlag(sock, FALSE);
                     }
                 }
                 else
@@ -383,6 +391,76 @@ void *connection_handler(void *socket_desc)
                     write(sock, server_message, strlen(server_message));
                 }
 
+            }
+            else
+                perror("recv failed");
+        }
+
+        // Client transfer file
+        else if(!strncmp(client_command, "put", 3))
+        {
+            int trans_state;
+            if((read_size = recv(sock, client_message, MAX_MESSAGE_LEN-1, 0)) > 0) // Get file name and size
+            {
+                // Parse client exist, filename and file size by '/'
+                char *tok;
+                tok = strtok(client_message, "/");
+
+                if(!strncmp(tok, "FILE_EXIST", 10))
+                {
+                    tok = strtok(NULL, "/");
+                    strcpy(filename, tok);
+                    tok = strtok(NULL, "/");
+                    
+                    long long filesize;
+                    filesize = atoll(tok);
+                    // printf("get %s %lld\n", filename, filesize);
+
+                    // Check file existence
+                    if(access(filename, F_OK)!=-1)
+                    {
+                        write(sock, "TRANSFER_WAIT", 13);
+                        trans_state = TRANSFER_WAIT;
+                    }
+                    else
+                    {
+                        write(sock, "TRANSFER_OK", 11);
+                        trans_state = TRANSFER_OK;
+                    }
+
+                    // Wait and get overwrite flag
+                    if(trans_state == TRANSFER_WAIT)
+                    {
+                        recv(sock, client_message, MAX_MESSAGE_LEN-1, 0);
+                        if(!strncmp(client_message, "TRANSFER_DISCARD", 16))
+                            trans_state = TRANSFER_DISCARD;
+                        else
+                            trans_state = TRANSFER_OK;
+                        // send ready flag
+                        write(sock, "READY", 5);
+                    }
+
+                    // recv
+                    if(trans_state == TRANSFER_OK)
+                    {
+                        setTransferFlag(sock, TRUE);
+                        FILE *fp = fopen(filename, "w");
+                        long long receive_cnt = 0;
+                        /* start to receive data */
+                        uint8_t segment[MAX_MESSAGE_LEN];
+                        while(receive_cnt < filesize)
+                        {
+                            read_size= recv(sock, segment, MAX_MESSAGE_LEN-1, 0);
+                            receive_cnt += read_size;
+                            fwrite(segment, sizeof(uint8_t), read_size, fp);
+                            fflush(fp);
+                        }                  
+                        printf("Get \"%s\" from client\n", filename);
+                        fclose(fp);
+                        fp = NULL;
+                        setTransferFlag(sock, FALSE);
+                    }
+                }
             }
             else
                 perror("recv failed");
@@ -603,8 +681,8 @@ void *connection_handler(void *socket_desc)
      
     if(read_size == 0)
     {
-        printf("Client %d disconnected\n", sock);
-        fflush(stdout);
+        // printf("Client %d disconnected\n", sock);
+        // fflush(stdout);
     }
     else if(read_size == -1)
     {
@@ -630,11 +708,14 @@ void *server_cmd_handler()
     puts("2. showip (si)");
     puts("3. shutdown [sec] (sd)");
     puts("#############################################");
+    puts("");
 
     char message[MAX_MESSAGE_LEN], command[MAX_COMMAND_LEN];
     while(1)
     {
         fgets(command, MAX_COMMAND_LEN-1, stdin);
+        if(command[0]=='\n')
+            continue;
         message_trim(command);
 
         //  broadcast. If client is downloading then not receive
@@ -652,22 +733,22 @@ void *server_cmd_handler()
             unsigned t;
             if(sscanf(command, "%s %u", dummy, &t)==2)
             {
-                sprintf(message, "Notice: Server Will shutdown after %u second\n", t);
+                sprintf(message, "Notice: Server Will shutdown after %u seconds\n", t);
                 send2All(message);
-                while(t)
+                ShutDown(t);
+            }
+            else
+            {
+                t = 10;
+                printf("Shutdown server after %u seconds?[y/n] ", t);
+                char check;
+                do
                 {
-                    // count down
-                    if(t<=10)
-                    {
-                        printf("%u ", t);
-                        fflush(stdout);
-                    }
-                    t--;
-                    sleep(1);
+                    scanf("%c", &check);
                 }
-                puts("");
-                clean(head);
-                exit(0);
+                while(check!='n'&&check!='y');
+                if(check=='y')
+                    ShutDown(t);
             }
         }
         else if(!(strncmp(command, "showip", 6)&&strncmp(command, "si", 2)))
@@ -703,11 +784,29 @@ void send2All(char *message)
     struct node* temp = head;
     while(temp!=NULL)
     {
-        if(!temp->isDownload)
+        if(!temp->isTransfer)
             write(temp->desc, message, strlen(message));
 
         temp = temp->next;
     }
+}
+
+void ShutDown(unsigned t)
+{
+    while(t)
+    {
+        // count down
+        if(t<=10)
+        {
+            printf("%u ", t);
+            fflush(stdout);
+        }
+        t--;
+        sleep(1);
+    }
+    puts("");
+    clean(head);
+    exit(0);
 }
 
 /* remove trailing newline character */
@@ -726,7 +825,7 @@ void message_trim(char* msg)
 //     printf("\n");
 // }
 
-void setDownloadFlag(int desc, int flag)
+void setTransferFlag(int desc, int flag)
 {
     int cnt = 0;
     struct node *temp;
@@ -739,7 +838,7 @@ void setDownloadFlag(int desc, int flag)
         {
             if(temp->desc==desc)
             {
-                temp->isDownload = flag;
+                temp->isTransfer = flag;
                 return;
             }
             else
@@ -754,7 +853,7 @@ void append(int desc)
     /* create new node */
     temp = (struct node *)malloc(sizeof(struct node));
     temp->desc = desc;
-    temp->isDownload = FALSE;
+    temp->isTransfer = FALSE;
     /* move to the end */
     right=(struct node *)head;
     while(right->next != NULL)
@@ -769,7 +868,7 @@ void addBeginning(int desc)
     struct node *temp;
     temp = (struct node *)malloc(sizeof(struct node));
     temp->desc = desc;
-    temp->isDownload = FALSE;
+    temp->isTransfer = FALSE;
     if(head == NULL)
     {
         head = temp;
@@ -795,7 +894,7 @@ void addAfter(int desc, int loc)
     }
     temp=(struct node *)malloc(sizeof(struct node));
     temp->desc=desc;
-    temp->isDownload = FALSE;
+    temp->isTransfer = FALSE;
     left->next=temp;
     left=temp;
     left->next=right;

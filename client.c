@@ -5,7 +5,8 @@
 #include <arpa/inet.h> //inet_addr
 #include <pthread.h>
 #include <unistd.h>
-// #include <semaphore.h>
+#include <sys/stat.h>
+#include <stdint.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -27,10 +28,11 @@
 //  MODE
 #define MESSAGE_MODE 1
 #define DOWNLOAD_MODE 2
+#define PUT_MODE 3
 
 // alias
-#define COMMAND_NUM 10
-#define MAX_ALIAS 50
+#define COMMAND_NUM 11
+#define MAX_ALIAS 200
 struct _alias
 {
     char cmd[MAX_COMMAND_LEN];
@@ -40,13 +42,15 @@ struct _alias
 int alias_cnt;
 // enum {CREATE, EDIT, CAT, REMOVE, LIST, DOWNLOAD, ENCRYPT, DECRYPT, RENAME, QUIT};
 const char alias_file_name[] = ".alias";
-const char *command_list[COMMAND_NUM] = {"create", "edit", "cat", "remove", "list", "download", "encrypt", "decrypt", "rename", "quit"};
+const char *command_list[COMMAND_NUM] = {"create", "edit", "cat", "remove", "list", "download", "encrypt", "decrypt", "rename", "quit", "put"};
 
 
 // sync wthread and rthread
 pthread_mutex_t wr_mutex  = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  fs_cond   = PTHREAD_COND_INITIALIZER;
 pthread_cond_t  ow_cond   = PTHREAD_COND_INITIALIZER;
+pthread_cond_t  cf_cond   = PTHREAD_COND_INITIALIZER;
+pthread_cond_t  rd_cond   = PTHREAD_COND_INITIALIZER;
 
 // download variable
 int mode;
@@ -81,9 +85,10 @@ int main(int argc , char *argv[])
     }
     else
     {
-        if(argv[1]=="localhost")
+        if(!strcmp(argv[1], "localhost"))
             ip = "127.0.0.1";
-        ip = argv[1];
+        else
+            ip = argv[1];
 
         if(argc==2)
         {
@@ -243,12 +248,10 @@ void* receive_handler(void* socket_desc)
     /* Get server message and output */
     while((read_size = recv(sock, message, MAX_MESSAGE_LEN-1, 0)) > 0)
     {
-        // DEBUG - INPUT MESSAGE INTEGERTY
-        // printf("\nread_size = %d\n", read_size);
-
         /**
         DOWNLOAD_MODE is invoked in wthread when output command 'd'.
-        MESSAGE_MODE will switch back automatically when download has been
+        MESSAGE_MODE will switch back automatically when download has been done.
+        PUT_MODE will get exist and ready flags
         **/
 
         if(mode == MESSAGE_MODE)
@@ -308,7 +311,7 @@ void* receive_handler(void* socket_desc)
                     fwrite(segment, sizeof(uint8_t), read_size, fp);
                     fflush(fp);
                 }                  
-                puts("Transfer Finished!");
+                puts("Download Finished!");
             }
 
             /* sync over */
@@ -321,7 +324,31 @@ void* receive_handler(void* socket_desc)
 
             /* resume to message mode */
             mode = MESSAGE_MODE;
+        }
+        else if(mode == PUT_MODE)
+        {
+            /* strat sync with wthread */
+            pthread_mutex_lock(&wr_mutex);
 
+             // Get exist flag
+            message[strlen(message)] = '\0';
+            if(!strncmp(message, "TRANSFER_WAIT", 13))
+                trans_state = TRANSFER_WAIT;    // Client confirm, send flag and wait ready
+            else
+                trans_state = TRANSFER_OK;      // transfer directly
+
+            pthread_cond_signal(&ow_cond);
+
+            if(trans_state == TRANSFER_WAIT)
+            {
+                // wait user confirm. Without this, the program will stuck in recv().
+                pthread_cond_wait(&cf_cond, &wr_mutex); 
+                recv(sock, message, MAX_MESSAGE_LEN-1, 0);  // wait READY flag
+                pthread_cond_signal(&rd_cond);
+            }
+
+            /* sync over */
+            pthread_mutex_unlock(&wr_mutex);
         }
     }
 
@@ -398,9 +425,13 @@ void* write_handler(void* socket_desc)
                     /* check overwrite */
                     printf("The file has already existed, do you want to overwrite?[y/n] ");
                     char check;
-                    scanf("%c", &check);
-                    if(check == 'y')
-                        overwrite = TRUE;
+                    do
+                    {
+                        scanf("%c", &check);
+                        if(check == 'y')
+                            overwrite = TRUE;
+                    }
+                    while(check!='n'&&check!='y');
 
                     /* send transfer flag to server */
                     if(overwrite)
@@ -411,6 +442,7 @@ void* write_handler(void* socket_desc)
                     }
                     else
                     {
+                        puts("Download Cancel!");
                         trans_state = TRANSFER_DISCARD;
                         write(sock, "TRANSFER_DISCARD", 16);
                     }
@@ -430,6 +462,98 @@ void* write_handler(void* socket_desc)
  
             /* sync over */
             pthread_mutex_unlock(&wr_mutex);
+        }
+        else if(!strncmp(message, "put", 3))
+        {
+            /* change to download mode => prevent from invoking other commands */
+            mode = PUT_MODE;
+
+            /* strat sync with wthread */
+            pthread_mutex_lock(&wr_mutex);
+
+            printf("File name: \n");
+            char filename[MAX_FILENAME_LEN];
+            fgets(filename, MAX_FILENAME_LEN-1, stdin);
+            message_trim(filename);
+            fp = fopen(filename, "r");
+            if(fp)
+            {
+                /* send client file exist flag */
+                /* Concat filename and file size then send */
+                struct stat st;
+                int result = stat(filename, &st);
+                long long fsize = st.st_size;
+                memset(message, 0, sizeof(message));
+                strcpy(message, "FILE_EXIST/");
+                strcat(message, filename);
+                sprintf(message, "%s/%lld", message, fsize);
+                write(sock, message, strlen(message));
+                // DEBUG - CHECK INFO MESSAGE
+                // printf("%s\n", message);
+
+                /* wait for receiving exist flag */
+                pthread_cond_wait(&ow_cond, &wr_mutex);
+
+                // File already exist
+                if(trans_state == TRANSFER_WAIT)
+                {
+                    int overwrite = FALSE;
+                    /* check overwrite */
+                    printf("The file has already existed, do you want to overwrite?[y/n] ");
+                    fflush(stdout);
+                    char check;
+                    do
+                    {
+                        scanf("%c", &check);
+                        if(check == 'y')
+                            overwrite = TRUE;
+                    }
+                    while(check!='n'&&check!='y');
+
+                    // send overwrite flag
+                    if(overwrite)
+                    {
+                        trans_state = TRANSFER_OK;
+                        write(sock, "TRANSFER_OK", 11);
+                    }
+                    else
+                    {
+                        trans_state = TRANSFER_DISCARD;
+                        write(sock, "TRANSFER_DISCARD", 16);
+                        puts("Transfer Cancel!");
+                    }
+
+                    pthread_cond_signal(&cf_cond);
+                    //  wait READY flag => prevent content being polluted
+                    pthread_cond_wait(&rd_cond, &wr_mutex);
+                }
+                
+                // Start transfer
+                if(trans_state == TRANSFER_OK)
+                {
+                    int read_size;
+                    while(read_size = fread(message, sizeof(uint8_t), MAX_MESSAGE_LEN-1, fp))
+                    {
+                        write(sock, message, read_size);  // tranfer data to client until EOF
+                    }
+                    puts("Transfer Findished!");
+                }
+
+
+                fclose(fp);
+                fp = NULL;
+            }
+            else
+            {
+                printf("File doesn't exist\n");
+                write(sock, "FILE_NOT_EXIST", 14);
+            }
+
+            /* strat sync with wthread */
+            pthread_mutex_unlock(&wr_mutex);
+
+            /* resume to MESSAGE_MODE */
+            mode = MESSAGE_MODE;
         }
     }
 
